@@ -28,13 +28,44 @@ from langflow_saas.models import (
     InvitationRead,
     InvitationStatus,
     MemberRead,
+    Organization,
     OrgRole,
+    Plan,
     UserOrganization,
 )
 from langflow_saas.services import get_audit_service, get_email_service
 from langflow_saas.settings import get_saas_settings
 
 router = APIRouter(tags=["Members & Invitations"])
+
+
+async def _check_seat_limit(db, org_id: UUID) -> None:
+    """Raise 402 if the org is at its plan's max_members limit."""
+    from langflow.services.deps import session_scope  # noqa: F401 (imported for type hints)
+
+    settings = get_saas_settings()
+
+    org_r = await db.exec(select(Organization).where(Organization.id == org_id))
+    org = org_r.first()
+
+    plan = None
+    if org and org.plan_id:
+        plan_r = await db.exec(select(Plan).where(Plan.id == org.plan_id))
+        plan = plan_r.first()
+
+    max_members = plan.max_members if plan else settings.default_max_members
+
+    if max_members == -1:
+        return  # unlimited
+
+    count_r = await db.exec(select(UserOrganization).where(UserOrganization.org_id == org_id))
+    current_count = len(count_r.all())
+
+    if current_count >= max_members:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=f"Member limit ({max_members}) reached. Upgrade your plan to add more members.",
+        )
 
 
 def _make_token(invitation_id: UUID, secret: str) -> str:
@@ -174,21 +205,12 @@ async def invite_member(org_id: UUID, body: InvitationCreate, ctx: RequireAdmin,
     settings = get_saas_settings()
     from langflow.services.deps import session_scope
 
-    from langflow_saas.models import Organization
-
     async with session_scope() as db:
-        # Check member cap.
+        # Enforce plan seat limit before issuing the invitation.
+        await _check_seat_limit(db, org_id)
+
         org_result = await db.exec(select(Organization).where(Organization.id == org_id))
         org = org_result.first()
-
-        count_result = await db.exec(select(UserOrganization).where(UserOrganization.org_id == org_id))
-        member_count = len(count_result.all())
-        if org and member_count >= settings.default_max_members:
-            raise HTTPException(
-                status_code=status.HTTP_402_PAYMENT_REQUIRED,
-                detail=f"Member limit ({settings.default_max_members}) reached. "
-                "Upgrade your plan to invite more members.",
-            )
 
         # Revoke any open invitation for same email+org.
         existing_inv = await db.exec(
@@ -303,8 +325,6 @@ async def get_invitation_info(token: str):
 
     from langflow.services.deps import session_scope
 
-    from langflow_saas.models import Organization
-
     async with session_scope() as db:
         result = await db.exec(select(Invitation).where(Invitation.id == inv_id))
         inv = result.first()
@@ -360,6 +380,9 @@ async def accept_invitation(token: str, ctx: CurrentOrgContext, request: Request
         )
         if existing_m.first():
             raise HTTPException(409, "You are already a member of this organization.")
+
+        # Enforce plan seat limit at acceptance time (plan may have changed since invite).
+        await _check_seat_limit(db, inv.org_id)
 
         # Create membership.
         membership = UserOrganization(
