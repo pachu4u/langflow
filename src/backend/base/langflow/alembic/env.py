@@ -63,6 +63,7 @@ def run_migrations_offline() -> None:
         "literal_binds": True,
         "dialect_opts": {"paramstyle": "named"},
         "render_as_batch": True,
+        "include_object": _include_object,
     }
 
     # Only add prepare_threshold for PostgreSQL
@@ -90,11 +91,19 @@ def _sqlite_do_begin(conn):
     conn.exec_driver_sql("BEGIN EXCLUSIVE")
 
 
+def _include_object(obj, name, type_, reflected, compare_to):  # noqa: ARG001
+    """Exclude SaaS plugin tables (saas_*) from Langflow's migration autogenerate."""
+    if type_ == "table" and name.startswith("saas_"):
+        return False
+    return True
+
+
 def _do_run_migrations(connection):
     configure_kwargs = {
         "connection": connection,
         "target_metadata": target_metadata,
         "render_as_batch": True,
+        "include_object": _include_object,
     }
 
     # Only add prepare_threshold for PostgreSQL

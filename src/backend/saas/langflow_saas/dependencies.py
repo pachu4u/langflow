@@ -70,6 +70,69 @@ RequireOwner = Annotated[OrgContextData, Depends(require_role(OrgRole.OWNER))]
 
 
 # ---------------------------------------------------------------------------
+# Superuser dependency — wraps Langflow's is_superuser flag.
+# Admin API endpoints use this so only server operators can access them.
+# ---------------------------------------------------------------------------
+
+
+async def require_superuser(request: Request):
+    """Resolve the current Langflow user and assert is_superuser=True."""
+    # Re-use Langflow's own superuser dependency by manually calling it
+    # with the request's Authorization header.
+    token = request.headers.get("Authorization", "")
+    if token.startswith("Bearer "):
+        token = token[7:]
+    if not token:
+        token = request.cookies.get("access_token_lf", "")
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
+        )
+
+    try:
+        import jwt as pyjwt
+        from langflow.services.auth.utils import get_jwt_verification_key
+        from langflow.services.deps import get_settings_service, session_scope
+        from sqlmodel import select
+
+        settings_service = get_settings_service()
+        algorithm = settings_service.auth_settings.ALGORITHM
+        key = get_jwt_verification_key(settings_service)
+
+        from uuid import UUID as UUIDType
+
+        payload = pyjwt.decode(token, key, algorithms=[algorithm], options={"verify_exp": True})
+        user_id_str = payload.get("sub")
+        if not user_id_str:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token.")
+        user_id = UUIDType(user_id_str)
+
+        from langflow.services.database.models.user.model import User
+
+        async with session_scope() as db:
+            result = await db.exec(select(User).where(User.id == user_id))
+            user = result.first()
+
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found.")
+        if not user.is_superuser:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Superuser access required for admin operations.",
+            )
+        return user
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token.") from exc
+
+
+RequireSuperuser = Annotated[object, Depends(require_superuser)]
+
+
+# ---------------------------------------------------------------------------
 # Shorthand for reading a UUID path param and validating it matches the
 # authenticated org (prevents IDOR on org-scoped resources).
 # ---------------------------------------------------------------------------
