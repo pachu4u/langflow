@@ -3,6 +3,7 @@
 Routes:
   GET   /api/saas/v1/plans                            — list active plans (public)
   GET   /api/saas/v1/orgs/{org_id}/billing            — get subscription details
+  POST  /api/saas/v1/orgs/{org_id}/billing/portal     — Stripe customer portal URL (self-serve)
   POST  /api/saas/v1/orgs/{org_id}/billing/checkout   — create Stripe checkout session
   GET   /api/saas/v1/orgs/{org_id}/usage              — get usage summary
   POST  /api/saas/v1/billing/webhook                  — Stripe webhook (no auth, HMAC-verified)
@@ -85,6 +86,35 @@ async def get_subscription(org_id: UUID, ctx: CurrentOrgContext):
 class CheckoutRequest(PlanRead):
     stripe_price_id: str
     billing_cycle: str = "monthly"  # "monthly" | "yearly"
+
+
+@router.post("/orgs/{org_id}/billing/portal")
+async def create_billing_portal(org_id: UUID, ctx: RequireAdmin):
+    """Generate a Stripe Customer Portal URL for self-serve billing management."""
+    assert_org_match(org_id, ctx)
+    settings = get_saas_settings()
+    if not settings.billing_enabled:
+        raise HTTPException(501, "Billing is not enabled on this instance.")
+
+    from langflow.services.deps import session_scope
+
+    async with session_scope() as db:
+        org_result = await db.exec(select(Organization).where(Organization.id == org_id))
+        org = org_result.first()
+        if not org:
+            raise HTTPException(404, "Organization not found.")
+        if not org.stripe_customer_id:
+            raise HTTPException(
+                402,
+                "No Stripe customer record exists for this org. "
+                "Please complete a checkout first to activate billing.",
+            )
+
+    portal_url = await get_billing_service().create_portal_session(
+        customer_id=org.stripe_customer_id,
+        return_url=f"{settings.app_base_url}/settings/billing",
+    )
+    return {"portal_url": portal_url}
 
 
 @router.post("/orgs/{org_id}/billing/checkout")

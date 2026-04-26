@@ -343,6 +343,18 @@ class BillingService:
         )
         return session["url"]
 
+    async def create_portal_session(self, *, customer_id: str, return_url: str) -> str:
+        """Create a Stripe Billing Portal session and return the redirect URL."""
+        import asyncio
+
+        stripe = self._stripe()
+        session = await asyncio.to_thread(
+            stripe.billing_portal.Session.create,
+            customer=customer_id,
+            return_url=return_url,
+        )
+        return session["url"]
+
     async def handle_webhook(self, *, payload: bytes, sig_header: str) -> dict[str, Any]:
         """Verify and process a Stripe webhook event.
 
