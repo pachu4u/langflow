@@ -15,6 +15,17 @@ from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _default_database_url() -> str:
+    """Return Langflow's configured database URL, falling back to env var or sqlite default."""
+    if url := os.getenv("LANGFLOW_DATABASE_URL"):
+        return url
+    try:
+        from langflow.services.deps import get_settings_service
+        return get_settings_service().settings.database_url
+    except Exception:
+        return "sqlite:///./langflow.db"
+
+
 class SaaSSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="SAAS_",
@@ -29,8 +40,8 @@ class SaaSSettings(BaseSettings):
     # in single-DB setups.
     # ------------------------------------------------------------------
     database_url: str = Field(
-        default_factory=lambda: os.getenv("LANGFLOW_DATABASE_URL", "sqlite:///./langflow.db"),
-        description="DB URL for SaaS tables (defaults to LANGFLOW_DATABASE_URL).",
+        default_factory=_default_database_url,
+        description="DB URL for SaaS tables (defaults to Langflow's own DB URL).",
     )
 
     # ------------------------------------------------------------------
@@ -118,3 +129,9 @@ def get_saas_settings() -> SaaSSettings:
     if _settings is None:
         _settings = SaaSSettings()
     return _settings
+
+
+def reset_saas_settings() -> None:
+    """Force re-initialization of settings (call after Langflow services are available)."""
+    global _settings
+    _settings = None

@@ -59,10 +59,20 @@ def _run_migrations() -> None:
         migrations_dir = Path(__file__).parent / "migrations"
         alembic_cfg.set_main_option("script_location", str(migrations_dir))
 
-        from langflow_saas.settings import get_saas_settings
+        import os
+
+        # Reset cached settings so database_url is derived from Langflow's live
+        # settings service (which is now initialized) rather than the import-time default.
+        from langflow_saas.settings import get_saas_settings, reset_saas_settings
+        reset_saas_settings()
 
         db_url = get_saas_settings().database_url
+        logger.info("langflow-saas: running migrations against %s", db_url)
         alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+
+        # env.py reads SAAS_DATABASE_URL at import time, so export it so the
+        # alembic env script uses the same resolved URL as the rest of the plugin.
+        os.environ["SAAS_DATABASE_URL"] = db_url
 
         command.upgrade(alembic_cfg, "heads")
         logger.info("langflow-saas: migrations applied.")

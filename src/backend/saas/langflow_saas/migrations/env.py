@@ -29,7 +29,19 @@ if config.config_file_name is not None:
 # SAAS_DATABASE_URL overrides LANGFLOW_DATABASE_URL for scenarios where the
 # SaaS tables live in a separate database (advanced multi-DB setups).
 # ---------------------------------------------------------------------------
-db_url = os.getenv("SAAS_DATABASE_URL") or os.getenv("LANGFLOW_DATABASE_URL") or "sqlite:///./langflow.db"
+def _resolve_db_url() -> str:
+    if url := os.getenv("SAAS_DATABASE_URL"):
+        return url
+    if url := os.getenv("LANGFLOW_DATABASE_URL"):
+        return url
+    try:
+        from langflow.services.deps import get_settings_service
+        return get_settings_service().settings.database_url
+    except Exception:
+        return "sqlite:///./langflow.db"
+
+
+db_url = _resolve_db_url()
 config.set_main_option("sqlalchemy.url", db_url)
 
 # ---------------------------------------------------------------------------

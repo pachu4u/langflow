@@ -54,6 +54,12 @@ class UsageMetric(str, enum.Enum):
     STORAGE_BYTES = "storage_bytes"
 
 
+class FlowSharePermission(str, enum.Enum):
+    READ = "read"    # view flow definition
+    RUN = "run"     # execute flow
+    EDIT = "edit"   # modify flow
+
+
 # ---------------------------------------------------------------------------
 # Plan  (created at deployment time / via admin, not user-facing CRUD)
 # ---------------------------------------------------------------------------
@@ -416,6 +422,43 @@ class FlowOrg(SQLModel, table=True):  # type: ignore[call-arg]
         sa_column=Column(sa.Uuid(), ForeignKey("user.id", ondelete="SET NULL"), nullable=True)
     )
     assigned_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ---------------------------------------------------------------------------
+# Flow sharing — per-flow permission grants for org members
+# ---------------------------------------------------------------------------
+
+
+class FlowShare(SQLModel, table=True):  # type: ignore[call-arg]
+    """Per-flow access grant within an org.
+
+    ``shared_with_user_id = NULL`` means the share applies to ALL org members.
+    Otherwise it targets a specific user.  Multiple rows can exist for one flow
+    (e.g., org-wide READ + specific user EDIT).
+    """
+
+    __tablename__ = "saas_flow_share"
+    __table_args__ = (
+        Index("ix_saas_flow_share_flow_id", "flow_id"),
+        Index("ix_saas_flow_share_org_id", "org_id"),
+        UniqueConstraint("flow_id", "org_id", "shared_with_user_id", "permission", name="uq_saas_flow_share"),
+    )
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    flow_id: UUID = Field(sa_column=Column(sa.Uuid(), nullable=False))
+    org_id: UUID = Field(
+        sa_column=Column(sa.Uuid(), ForeignKey("saas_organization.id", ondelete="CASCADE"), nullable=False)
+    )
+    shared_with_user_id: UUID | None = Field(
+        sa_column=Column(sa.Uuid(), ForeignKey("user.id", ondelete="CASCADE"), nullable=True)
+    )
+    permission: FlowSharePermission = Field(
+        sa_column=Column(sa.Enum(FlowSharePermission, name="flowsharepermission"), nullable=False)
+    )
+    shared_by: UUID | None = Field(
+        sa_column=Column(sa.Uuid(), ForeignKey("user.id", ondelete="SET NULL"), nullable=True)
+    )
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
