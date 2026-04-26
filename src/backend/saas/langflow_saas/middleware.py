@@ -542,8 +542,12 @@ class QuotaEnforcementMiddleware(BaseHTTPMiddleware):
     async def _record_execution(self, ctx: OrgContextData) -> None:
         try:
             from langflow.services.deps import session_scope
+            from sqlalchemy import func
+            from sqlmodel import select
 
-            from langflow_saas.models import UsageRecord
+            from langflow_saas.models import Organization, Plan, UsageRecord
+
+            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
             record = UsageRecord(
                 org_id=ctx.org_id,
@@ -554,8 +558,105 @@ class QuotaEnforcementMiddleware(BaseHTTPMiddleware):
             async with session_scope() as db:
                 db.add(record)
                 await db.commit()
+
+                # Determine limit and new usage count for threshold checks.
+                org_r = await db.exec(select(Organization).where(Organization.id == ctx.org_id))
+                org = org_r.first()
+                limit = get_saas_settings().default_max_executions_per_day
+                if org and org.plan_id:
+                    plan_r = await db.exec(select(Plan).where(Plan.id == org.plan_id))
+                    plan = plan_r.first()
+                    if plan and plan.max_executions_per_day != -1:
+                        limit = plan.max_executions_per_day
+
+                if limit == -1:
+                    return
+
+                count_r = await db.exec(
+                    select(func.sum(UsageRecord.value)).where(
+                        UsageRecord.org_id == ctx.org_id,
+                        UsageRecord.metric == UsageMetric.FLOW_EXECUTION,
+                        UsageRecord.recorded_at >= today_start,
+                    )
+                )
+                used = int(count_r.first() or 0)
+
+            await self._maybe_send_quota_warning(ctx.org_id, used, limit)
         except Exception:  # noqa: BLE001
             logger.warning("Failed to record execution usage for org %s", ctx.org_id)
+
+    async def _maybe_send_quota_warning(self, org_id: UUID, used: int, limit: int) -> None:
+        """Send quota warning emails at 80% and 100% usage, deduplicated via Redis."""
+        if limit <= 0:
+            return
+
+        pct = used / limit * 100
+        threshold: int | None = None
+        if used >= limit:
+            threshold = 100
+        elif pct >= 80:
+            threshold = 80
+        else:
+            return
+
+        # Deduplicate: only send once per org per threshold per day.
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        dedup_key = f"saas:qw:{org_id}:{today}:{threshold}"
+        redis = _get_redis()
+        if redis:
+            try:
+                async with redis:
+                    already_sent = await redis.get(dedup_key)
+                    if already_sent:
+                        return
+                    # Mark as sent with TTL until end of day (~24h).
+                    await redis.setex(dedup_key, 86400, "1")
+            except Exception:  # noqa: BLE001
+                pass  # Without Redis dedup, fall through and send anyway.
+
+        try:
+            from langflow.services.database.models.user.model import User
+            from langflow.services.deps import session_scope
+            from sqlmodel import select
+
+            from langflow_saas.models import Organization, OrgRole, UserOrganization
+            from langflow_saas.services import get_email_service
+
+            async with session_scope() as db:
+                org_r = await db.exec(select(Organization).where(Organization.id == org_id))
+                org = org_r.first()
+                if not org:
+                    return
+
+                # Find the org owner's email.
+                owner_r = await db.exec(
+                    select(UserOrganization, User)
+                    .join(User, User.id == UserOrganization.user_id)  # type: ignore[arg-type]
+                    .where(
+                        UserOrganization.org_id == org_id,
+                        UserOrganization.role == OrgRole.OWNER,
+                    )
+                )
+                owner_row = owner_r.first()
+                if not owner_row:
+                    return
+                _, owner = owner_row
+                owner_email = getattr(owner, "email", None)
+                if not owner_email:
+                    return
+
+            await get_email_service().send_quota_warning(
+                to_email=owner_email,
+                org_name=org.name,
+                metric="daily flow executions",
+                used=used,
+                limit=limit,
+            )
+            logger.info(
+                "langflow-saas: sent %d%% quota warning for org %s (%d/%d)", threshold, org_id, used, limit
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("langflow-saas: failed to send quota warning for org %s", org_id)
 
 
 # ---------------------------------------------------------------------------
